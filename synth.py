@@ -10,6 +10,8 @@ from toposort import toposort, toposort_flatten
 import matplotlib.pyplot as plt
 import librosa.display
 import simpleaudio
+import sounddevice as sd
+
 
 #import IPython.display as ipd
 
@@ -182,11 +184,11 @@ f = 440
 
 generators = {
     '1': [
-        saw(0.5, 0.5, pan=30), 
+        saw(0.3, 0.5, pan=30), 
         #noise(0.5, pan=0),
     ],
     '2': [
-        sine(A=0.5, pan=-30),
+        sine(A=0.2, pan=-30),
     ],
 }
 
@@ -210,9 +212,21 @@ connections = [
 ]
 y = mix(sr, f, t, generators, filters, connections)
 
-play_obj = simpleaudio.play_buffer(y, 2, 2, sr)
-play_obj.wait_done()
+def quantize(y):
+    return np.int16((y*32767).clip(-32768, 32767))
 
+qy = quantize(y)
+
+# Save to a file
+#scipy.io.wavfile.write('a.wav', sr, qy.T)
+
+# Or play it directly
+sd.default.samplerate = sr
+sd.play(qy.T, blocking=True)
+
+# Also, you can visualize it
 #easy_visualize(sr, y)
 #plot_filter_transfer_function(sr, delay(1/100, 0.5))
+
+# When in ipython play sound in this way
 #ipd.Audio(y, rate=sr)

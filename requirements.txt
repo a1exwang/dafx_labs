@@ -1,0 +1,7 @@
+librosa==0.7.1
+matplotlib==3.0.3
+numpy==1.16.3
+scipy==1.2.1
+simpleaudio==1.0.2
+sounddevice==0.3.13
+toposort==1.5
