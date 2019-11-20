@@ -1,5 +1,5 @@
 #%matplotlib notebook
-
+#import IPython.display as ipd
 
 import numpy as np
 import scipy.signal
@@ -9,11 +9,9 @@ from toposort import toposort, toposort_flatten
 
 import matplotlib.pyplot as plt
 import librosa.display
-import simpleaudio
 import sounddevice as sd
 
 
-#import IPython.display as ipd
 
 #### helpers
 # pan in (-60, 60)
@@ -35,7 +33,7 @@ def panning(x, pan):
 #### Generators
 def sine(A, pan):
     def _sine(sr, f, t):
-        return panning(A * np.sin(2 * np.pi * f * t), pan)
+        return panning(A * np.exp(-1j * 2 * np.pi * f * t), pan)
     return _sine
 
 # General Saw wave
@@ -45,14 +43,18 @@ def sine(A, pan):
 # pan is in [-1, 1], -1 for left, 1 for right
 def saw(A, width=1, pan=0):
     def _saw(sr, f, t):
-        a  = scipy.signal.sawtooth(2 * np.pi * f * t, width=width)
-        y = A * a
+        real  = scipy.signal.sawtooth(2 * np.pi * f * t, width=width)
+        im  = scipy.signal.sawtooth(2 * np.pi * f * t + np.pi / 2, width=width)
+        y = A * (real + 1j * im)
         return panning(y, pan)
     return _saw
 
 def noise(A, pan):
     def _f(sr, f, t):
-        return panning(np.random.random(len(t)), pan)
+        a = math.ceil(sr / f)
+        n = t.shape[-1]
+        y = np.random.random(n + a)
+        return panning(y[:n-a] + 1j * y[a:], pan)
     return _f
 
 
@@ -96,12 +98,52 @@ def iirfilter(btype, wpass, wstop, gpass=3, gstop=35):
     N, Wn = scipy.signal.buttord(wpass, wstop, gpass, gstop, analog=False)
     def _f(sr, x):
         b, a = scipy.signal.butter(N, Wn, btype, analog=False)
-        ret = scipy.signal.filtfilt(b, a, x).astype(float)
+        ret = scipy.signal.filtfilt(b, a, x).astype('complex128')
         return ret
     return _f
 
+## Modulators
+def ring_modulator(f_c, carrier_func=np.sin, phi0=0):
+    def _f(sr, x):
+        n = x.shape[-1]
+        return carrier_func(2*np.pi * f_c/sr * np.arange(n) + phi0) * x.real + \
+            1j * carrier_func(2*np.pi * f_c/sr * np.arange(n) + phi0 + np.pi/2) * x.imag
+    return _f
+
+def amplitude_modulator(f_c, alpha, carrier_func=np.sin, phi0=0):
+    def _f(sr, x):
+        n = x.shape[-1]
+        return (1 + alpha * carrier_func(2*np.pi * f_c/sr * np.arange(n) + phi0)) * x.real + \
+            (1 + alpha * carrier_func(2*np.pi * f_c/sr * np.arange(n) + phi0 + np.pi/2)) * x.imag
+    return _f
+
+def phase_modulator(f_c, A=1, k=1):
+    f = lambda sr, n, x: A * np.cos(2*np.pi* f_c/sr * np.arange(n) + k * x.real)
+    def _f(sr, x):
+        n = x.shape[-1]
+        return f(sr, n, x.real) + 1j * f(sr, n, x.imag)
+    return _f
+
+def frequency_modulator(f_c, A=1, k=1):
+    def _f(sr, x):
+        n = x.shape[-1]
+        sum_x = np.full_like(x, 0)
+        for i in range(n):
+            sum_x[:, i] = np.sum(x[:, i])
+        f = lambda data: A * np.cos(2*np.pi* f_c/sr * np.arange(n) + 2*np.pi * k * data)
+        return f(sum_x.real) + 1j*f(sum_x.imag) 
+    return _f
+
+def ssb_modulator(f_c, carrier_func=np.cos):
+    def _f(sr, x):
+        n = x.shape[-1]
+        return carrier_func(2*np.pi * f_c/sr * np.arange(n)) * x.real - \
+             np.sign(f_c) * carrier_func(2*np.pi * f_c/sr * np.arange(n) + np.pi/2) * x.imag
+    return _f
+        
+
 #### A simple player and mixer
-def mix(sr, freq, time_points, generators, filters, connections):
+def mix(sr, freq, time_points, generators, filters, connections, output_channels=('0',)):
     deps = {}
     for f, t in connections:
         if t in deps:
@@ -114,7 +156,7 @@ def mix(sr, freq, time_points, generators, filters, connections):
     sort_result = toposort(deps)
     for channels in sort_result:
         for channel in channels:
-            channel_out = np.zeros([2, len(time_points)])
+            channel_out = np.zeros([2, len(time_points)], dtype='complex128')
             if channel in deps:
                 for dep_channel in deps[channel]:
                     channel_out += channel_outs[dep_channel]
@@ -127,7 +169,10 @@ def mix(sr, freq, time_points, generators, filters, connections):
                     channel_out = filt(sr, channel_out)
             
             channel_outs[channel] = channel_out
-    return channel_outs['0']
+    ret = []
+    for c in output_channels:
+        ret.append(channel_outs[c])
+    return ret
 
 
 def plot_dft(sr, y, title='', ylim=None):
@@ -150,11 +195,12 @@ def plot_dft(sr, y, title='', ylim=None):
     plt.title(title)
     ax.set_xscale('log')
 
-def plot_filter_transfer_function(sr, f):
-    x = np.zeros(sr)
-    x[0] = sr / 2
+def plot_filter_transfer_function(sr, f, stereo=True):
+    x = np.zeros([2, sr])
+    x[:, 0] = sr / 2
     y = f(sr, x)
-    plot_dft(sr, y, title='Transfer Function(Magnitude)')
+    plot_dft(sr, y[0], title='Transfer Function(Magnitude), L')
+    plot_dft(sr, y[1], title='Transfer Function(Magnitude), R')
     
 def easy_visualize(sr, y):
     first_n = 1024
@@ -180,20 +226,20 @@ def easy_visualize(sr, y):
 sr = 44100
 T = 4
 t = np.linspace(0, T, int(T*sr))
-f = 440
+f = 220
 
 generators = {
-    '1': [
-        saw(0.3, 0.5, pan=30), 
+    'saw': [
+        saw(0.5, 0.5, pan=30), 
         #noise(0.5, pan=0),
     ],
-    '2': [
-        sine(A=0.2, pan=-30),
+    'sine': [
+        sine(A=0.5, pan=-30),
     ],
 }
 
 filters = {
-    '1': [
+    'vdelay': [
         delay(0.1, 0.5),
         vdelay(
             lambda i: 0.3*(math.sin(2*math.pi*0.5*i/sr)+1)/2, lambda i: 0.5),
@@ -201,32 +247,52 @@ filters = {
     '2': [
         delay(0.8, 0.5),
     ],
-    '3': [
+    'iir': [
         iirfilter('lowpass', 1000/(sr/2), 1500/(sr/2)),
+    ],
+    'rm': [
+        ring_modulator(f_c=50, carrier_func=np.sin),
+    ],
+    'am': [
+        amplitude_modulator(f_c=2, alpha=0.5, carrier_func=np.sin),
+    ],
+    'pm': [
+        phase_modulator(f_c=2),
+    ],    
+    'fm': [
+        frequency_modulator(f_c=2, k=1),
+    ],
+    'ssb': [
+        ssb_modulator(f_c=-2)
     ]
 }
 connections = [
-    ('1', '3'),
-    ('2', '0'),
-    ('3', '0'),
+    ('saw', 'iir'),
+    ('saw', 'vdelay'),
+    ('vdelay', 'master'),
+    ('iir', 'master'),
+    
+    ('saw', 'rm'),
+    ('saw', 'am'),
+    ('saw', 'pm'),
+    ('saw', 'fm'),
+    ('saw', 'ssb'),
 ]
-y = mix(sr, f, t, generators, filters, connections)
 
-def quantize(y):
-    return np.int16((y*32767).clip(-32768, 32767))
+y_complex, = mix(sr, f, t, generators, filters, connections, output_channels=('ssb',))
+y = y_complex.real
 
-qy = quantize(y)
-
-# Save to a file
-#scipy.io.wavfile.write('a.wav', sr, qy.T)
+# scipy wants y to be (nsamples, nchannels)
+scipy.io.wavfile.write('audio.wav', sr, y.T.astype('float32'))
 
 # Or play it directly
-sd.default.samplerate = sr
-sd.play(qy.T, blocking=True)
+#sd.default.samplerate = sr
+#sd.play(qy.T, blocking=True)
 
 # Also, you can visualize it
 #easy_visualize(sr, y)
-#plot_filter_transfer_function(sr, delay(1/100, 0.5))
+#plot_filter_transfer_function(sr, delay(1/100, 0.5), stereo=False)
 
 # When in ipython play sound in this way
 #ipd.Audio(y, rate=sr)
+
