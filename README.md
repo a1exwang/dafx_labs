@@ -28,6 +28,7 @@ Reading the book [Digital Audio Effects(DAFX)](https://www.amazon.com/DAFX-Digit
 - Filters and Delays
 	- Comb filter(delay line), GrossBeat
 	- IIR filter
+	- Vibrato, Echo, Slapback, Flanger
 - Modulators
 	- Single Side Band
 	- Ring Modulator

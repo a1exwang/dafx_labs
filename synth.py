@@ -1,5 +1,5 @@
 #%matplotlib notebook
-#import IPython.display as ipd
+import IPython.display as ipd
 
 from datetime import datetime
 import numpy as np
@@ -89,7 +89,7 @@ def pass_thru():
 def delay(d, decay):
     def _delay(sr, x):
         y = np.full_like(x, 0)
-        delay_count = int(d * sr)
+        delay_count = max(int(d * sr), 0)
         for i in range(x.shape[1]):
             if i - delay_count < 0:
                 delay_y = 0
@@ -101,12 +101,18 @@ def delay(d, decay):
 
 # Variable-delay-value delay line.
 # @delay_func: delay_func(i) gives the delay value at sample point `i`
+# This can help implementing Vibrato, Echo, Flanger, Chorus
+# DAFX 2.6.2 Flanger, chorus, slapback, echo
 def vdelay(delay_func, decay_func):
     def _f(sr, x):
         y = np.full_like(x, 0)
-        for i in range(x.shape[1]):
-            delay_count = int(delay_func(i)*sr)
-            y[:, i] = x[:, i] + decay_func(i) * y[:, i-delay_count] if (i-delay_count) >= 0 else 0
+        for i in range(x.shape[-1]):
+            delay_count = max(int(delay_func(i)*sr), 0)
+            decay = decay_func(i)
+            if i-delay_count >= 0:
+                y[:, i] = x[:, i] + decay * y[:, i-delay_count]
+            else:
+                y[:, i] = 0
         return y
     return _f
 
@@ -161,10 +167,13 @@ def ssb_modulator(f_c, carrier_func=np.cos):
              np.sign(f_c) * carrier_func(2*np.pi * f_c/sr * np.arange(n) + np.pi/2) * x.imag
     return _f
 
+
 #### Dynamic Range Control
 
 
-# DAFX: p110
+# The implementation is from DAFX: p110.
+# But for detailed explanation, 
+#  please refer to Digital Audio Signal Processing, Chapter 7 Dynamic Range Control
 def limiter(threshold_db, attack_time, release_time, delay_time, plot=False):
     def _f(sr, x):
         threshold = 10 ** (threshold_db/10)
@@ -173,16 +182,14 @@ def limiter(threshold_db, attack_time, release_time, delay_time, plot=False):
         n = x.shape[-1]
         delay_n = round(delay_time*sr)
         def calculate(x_in):
-            xpeak = np.array([0, 0])
             gain = np.array([1, 1])
             y = np.full_like(x_in, 0)
             abs_xn = np.abs(x_in)
             gains = np.full_like(x_in, 0)
+            xpeak = peak_level_measurement(sr, x_in, attack_time, release_time)
             for i in range(n):
-                k = np.where(abs_xn[:, i] > xpeak, at, rt)
-                xpeak = (1-k)*xpeak + k*abs_xn[:, i]
                 # Do not replace this with min(1, threshold/xpeak) for DivisionByZero error
-                f = np.full_like(xpeak, 0)
+                f = np.full_like(gain, 0)
                 for j in range(len(xpeak)):
                     f[j] = threshold/xpeak[j] if xpeak[j] > threshold else 1
                 k = np.where(f < gain, at, rt)
@@ -198,7 +205,9 @@ def limiter(threshold_db, attack_time, release_time, delay_time, plot=False):
     return _f
 
 
-# DAFX: p112
+# The implementation is from DAFX: p112.
+# But for detailed explanation, 
+#  please refer to Digital Audio Signal Processing, Chapter 7 Dynamic Range Control
 def compressor(compressor_threshold_db, 
                compressor_scale, 
                expander_threshold_db, 
@@ -376,10 +385,24 @@ generators = {
 }
 
 filters = {
-    'vdelay': [
-        delay(0.1, 0.5),
+#     'vdelay': [
+#         delay(0.1, 0.5),
+#         vdelay(
+#             lambda i: 0.3*(math.sin(2*math.pi*0.5*i/sr)+1)/2, lambda i: 0.5),
+#     ],
+    'slapback': [
+        delay(d=0.015, decay=0.5),
+    ],
+    'echo': [
+        delay(d=0.05, decay=0.5),
+    ],
+    'vibrato': [
         vdelay(
-            lambda i: 0.3*(math.sin(2*math.pi*0.5*i/sr)+1)/2, lambda i: 0.5),
+            lambda i: 0.0075 + 0.0025*math.sin(2*math.pi*5*i/sr), lambda i: 0.8),
+    ],
+    'flanger': [
+        vdelay(
+            lambda i: 0.010 + 0.005*math.sin(2*math.pi*0.5*i/sr), lambda i: 0.8),
     ],
     '2': [
         delay(0.8, 0.5),
@@ -402,17 +425,17 @@ filters = {
     'ssb': [
         ssb_modulator(f_c=-2)
     ],
-    'compressor': [
-        compressor(compressor_threshold_db=-40,
-                   compressor_scale=0.9,
-                   expander_threshold_db=0,
-                   expander_scale=1,
-                   attack_time=0.01, 
-                   release_time=0.01, 
-                   delay_time=0.001,
-                   average_time=0.05,
-                   plot=True)
-    ]
+#     'compressor': [
+#         compressor(compressor_threshold_db=-40,
+#                    compressor_scale=0.9,
+#                    expander_threshold_db=0,
+#                    expander_scale=1,
+#                    attack_time=0.01, 
+#                    release_time=0.01, 
+#                    delay_time=0.001,
+#                    average_time=0.05,
+#                    plot=True)
+#     ]
 }
 connections = [
     ('saw', 'iir'),
@@ -425,24 +448,25 @@ connections = [
     ('saw', 'pm'),
     ('saw', 'fm'),
     ('saw', 'ssb'),
-    ('piano', 'compressor'),
+#    ('piano', 'compressor'),
+    ('saw', 'flanger')
 ]
 
-y_complex, = mix(sr, f, t, generators, filters, connections, output_channels=('compressor',))
+y_complex, = mix(sr, f, t, generators, filters, connections, output_channels=('flanger',))
 y = y_complex.real
 
 # scipy wants y to be (nsamples, nchannels)
-scipy.io.wavfile.write('audio.wav', sr, y.T.astype('float32'))
+#scipy.io.wavfile.write('audio.wav', sr, y.T.astype('float32'))
 
 # Or play it directly
 #sd.default.samplerate = sr
 #sd.play(qy.T, blocking=True)
 
 # Also, you can visualize it
-#easy_visualize(sr, y)
+easy_visualize(sr, y)
 #plot_filter_transfer_function(sr, delay(1/100, 0.5), stereo=False)
 
 # When in ipython play sound in this way
-#ipd.Audio(y, rate=sr)
+ipd.Audio(y, rate=sr)
 
 
