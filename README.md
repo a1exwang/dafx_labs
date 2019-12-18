@@ -40,4 +40,6 @@ Reading the book [Digital Audio Effects(DAFX)](https://www.amazon.com/DAFX-Digit
 	- Compressor
 	- Expander
 
-
+# TODOs
+	- Wah-Wah Filter, Bell
+	- Time/Frequency Warping
