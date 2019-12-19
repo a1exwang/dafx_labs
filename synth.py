@@ -34,7 +34,30 @@ def panning(x, pan):
     l_out = l * math.sqrt(1 / (1 + a*a))
     r_out = r * math.sqrt(1 / (1 + a*a)) * a
     return np.array([l_out, r_out])
-        
+
+def periodize(f, T):
+    assert(type(T) == int)
+    def _f(t):
+        return f(t % T)
+    return _f
+
+def load_sample(file_path, sr=None):
+    rate, x = scipy.io.wavfile.read(file_path)
+    x = x.T
+    if x.dtype == np.int16:
+        x = x.astype(float) / 2**15
+    x = x
+    print('load sample ' + file_path + ' ' + str(sr))
+    if not sr:
+        return rate, x
+    else:
+        n2 = int(x.shape[-1] * sr / rate)
+        y = np.zeros((2, n2))
+        y[0, :] = scipy.signal.resample(x[0, :], n2)
+        y[1, :] = scipy.signal.resample(x[1, :], n2)
+        return sr, y
+
+    
 #### Generators
 def sine(A, pan):
     def _sine(sr, f, t):
@@ -58,17 +81,14 @@ def noise(A, pan):
     def _f(sr, f, t):
         a = math.ceil(sr / f)
         n = t.shape[-1]
-        y = np.random.random(n + a)
+        y = np.random.random(n + a) * A
         return panning(y[:n-a] + 1j * y[a:], pan)
     return _f
 
 def sampler(A, file_path):
-    rate, x = scipy.io.wavfile.read(file_path)
-    x = x.T
-    if x.dtype == np.int16:
-        x = x.astype(float) / 2**15
-    
     def _f(sr, f, t):
+        rate, x = load_sample(file_path, sr)
+        x *= A
         assert(rate==sr)
         n = t.shape[-1]
         if n > x.shape[-1]:
@@ -256,6 +276,33 @@ def compressor(compressor_threshold_db,
     return _f
 
 
+#### Time and Frequency Warping
+
+# Straight-forward time warping without interpolation
+def time_warping(theta):
+    def _f(sr, x):
+        n = x.shape[-1]
+        y = np.full_like(x, 0)
+        for t in range(n):
+            m = np.clip(int(theta(t)), 0, n)
+            y[:, t] = x[:, m]
+        return y
+    return _f
+
+
+#### Spatial Effects
+
+# Convolution Reverb
+def convolver(h):
+    def _f(sr, x):
+        y = np.full_like(x, 0)
+        n = x.shape[-1]
+        for i in range(x.shape[0]):
+            # result length >= n
+            y[i, :] = np.convolve(x[i, :], h[i, :], mode='same')
+        return y
+    return _f
+
 #### A simple player and mixer
 def mix(sr, freq, time_points, generators, filters, connections, output_channels=('0',), profile=True):
     deps = {}
@@ -368,6 +415,9 @@ T = 2
 t = np.linspace(0, T, int(T*sr))
 f = 220
 
+print('load reverb')
+_, reverb1_h = load_sample('reverb1.wav', sr)
+print('load reverb done')
 generators = {
     'saw': [
         saw(0.5, 0.5, pan=30), 
@@ -390,41 +440,41 @@ filters = {
 #         vdelay(
 #             lambda i: 0.3*(math.sin(2*math.pi*0.5*i/sr)+1)/2, lambda i: 0.5),
 #     ],
-    'slapback': [
-        delay(d=0.015, decay=0.5),
-    ],
-    'echo': [
-        delay(d=0.05, decay=0.5),
-    ],
-    'vibrato': [
-        vdelay(
-            lambda i: 0.0075 + 0.0025*math.sin(2*math.pi*5*i/sr), lambda i: 0.8),
-    ],
-    'flanger': [
-        vdelay(
-            lambda i: 0.010 + 0.005*math.sin(2*math.pi*0.5*i/sr), lambda i: 0.8),
-    ],
+#     'slapback': [
+#         delay(d=0.015, decay=0.5),
+#     ],
+#     'echo': [
+#         delay(d=0.05, decay=0.5),
+#     ],
+#     'vibrato': [
+#         vdelay(
+#             lambda i: 0.0075 + 0.0025*math.sin(2*math.pi*5*i/sr), lambda i: 0.8),
+#     ],
+#     'flanger': [
+#         vdelay(
+#             lambda i: 0.010 + 0.005*math.sin(2*math.pi*0.5*i/sr), lambda i: 0.8),
+#     ],
     '2': [
         delay(0.8, 0.5),
     ],
     'iir': [
         iirfilter('lowpass', 1000/(sr/2), 1500/(sr/2)),
     ],
-    'rm': [
-        ring_modulator(f_c=50, carrier_func=np.sin),
-    ],
-    'am': [
-        amplitude_modulator(f_c=2, alpha=0.5, carrier_func=np.sin),
-    ],
-    'pm': [
-        phase_modulator(f_c=2),
-    ],    
-    'fm': [
-        frequency_modulator(f_c=2, k=1),
-    ],
-    'ssb': [
-        ssb_modulator(f_c=-2)
-    ],
+#     'rm': [
+#         ring_modulator(f_c=50, carrier_func=np.sin),
+#     ],
+#     'am': [
+#         amplitude_modulator(f_c=2, alpha=0.5, carrier_func=np.sin),
+#     ],
+#     'pm': [
+#         phase_modulator(f_c=2),
+#     ],    
+#     'fm': [
+#         frequency_modulator(f_c=2, k=1),
+#     ],
+#     'ssb': [
+#         ssb_modulator(f_c=-2)
+#     ],
 #     'compressor': [
 #         compressor(compressor_threshold_db=-40,
 #                    compressor_scale=0.9,
@@ -435,38 +485,45 @@ filters = {
 #                    delay_time=0.001,
 #                    average_time=0.05,
 #                    plot=True)
+#     ],
+    'time-warping': [
+        time_warping(periodize(lambda x: np.exp(x/sr * 10)/np.exp(10) * sr, 1 * sr))
+    ],
+#     'reverb': [
+#         convolver(reverb1_h),
 #     ]
 }
 connections = [
-    ('saw', 'iir'),
-    ('saw', 'vdelay'),
-    ('vdelay', 'master'),
-    ('iir', 'master'),
+#     ('saw', 'iir'),
+#     ('saw', 'vdelay'),
+#     ('vdelay', 'master'),
+#     ('iir', 'master'),
     
-    ('saw', 'rm'),
-    ('saw', 'am'),
-    ('saw', 'pm'),
-    ('saw', 'fm'),
-    ('saw', 'ssb'),
+#     ('saw', 'rm'),
+#     ('saw', 'am'),
+#     ('saw', 'pm'),
+#     ('saw', 'fm'),
+#     ('saw', 'ssb'),
 #    ('piano', 'compressor'),
-    ('saw', 'flanger')
+    ('piano', 'time-warping'),
 ]
 
-y_complex, = mix(sr, f, t, generators, filters, connections, output_channels=('flanger',))
+y_complex, = mix(sr, f, t, generators, filters, connections, output_channels=('time-warping',))
 y = y_complex.real
 
-# scipy wants y to be (nsamples, nchannels)
-#scipy.io.wavfile.write('audio.wav', sr, y.T.astype('float32'))
+# # scipy wants y to be (nsamples, nchannels)
+# #scipy.io.wavfile.write('audio.wav', sr, y.T.astype('float32'))
 
-# Or play it directly
-#sd.default.samplerate = sr
-#sd.play(qy.T, blocking=True)
+# # Or play it directly
+# #sd.default.samplerate = sr
+# #sd.play(qy.T, blocking=True)
 
-# Also, you can visualize it
-easy_visualize(sr, y)
-#plot_filter_transfer_function(sr, delay(1/100, 0.5), stereo=False)
+# # Also, you can visualize it
+# easy_visualize(sr, y)
+# #plot_filter_transfer_function(sr, delay(1/100, 0.5), stereo=False)
 
-# When in ipython play sound in this way
-ipd.Audio(y, rate=sr)
+# # When in ipython play sound in this way
+# ipd.Audio(y, rate=sr)
 
+print(123)
 
